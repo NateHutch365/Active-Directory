@@ -450,19 +450,31 @@ if ($gpoCoverage -and $gpoCoverage.Count -gt 0) {
         Write-Host ("  Security Filtering : {0}" -f $g.SecurityFiltering)
     }
 
+    # -------------------------------------------------
+    # Design advisory if Default Domain Policy is #1
+    # -------------------------------------------------
+    $topCandidate = $gpoCoverage | Select-Object -First 1
+
+    if ($topCandidate.GpoName -eq "Default Domain Policy") {
+
+        Write-Host ""
+        Write-Host "Design advisory:" -ForegroundColor Yellow
+        Write-Host "  Default Domain Policy currently appears to act as the baseline for this setting (highest score)." -ForegroundColor Yellow
+        Write-Host "  It is generally recommended to keep Default Domain Policy minimal (password, account lockout, Kerberos)." -ForegroundColor Yellow
+        Write-Host "  Consider consolidating this setting into a dedicated baseline GPO if pursuing a minimal Default Domain Policy model." -ForegroundColor Yellow
+
+        $nextBest = $gpoCoverage |
+            Where-Object { $_.GpoName -ne "Default Domain Policy" } |
+            Select-Object -First 1
+
+        if ($nextBest) {
+            Write-Host ""
+            Write-Host "  Suggested alternative baseline candidate:" -ForegroundColor Yellow
+            Write-Host ("   - {0} (Score: {1})" -f $nextBest.GpoName, $nextBest.TotalScore) -ForegroundColor Yellow
+        }
+    }
 }
 else {
     Write-Host "Baseline candidate: None (no matches)" -ForegroundColor Yellow
 }
 
-# Simple recommendation logic
-Write-Host ""
-if ($totalMatches -eq 0) {
-    Write-Host "Recommendation: Setting not found in any GPO." -ForegroundColor Yellow
-}
-elseif ($sameScopeCount -gt 0 -or $hierCount -gt 0) {
-    Write-Host "Recommendation: Overlap detected. Review for consolidation or architectural simplification." -ForegroundColor Yellow
-}
-else {
-    Write-Host "Recommendation: No scope overlap detected. Configuration appears clean from a linkage perspective." -ForegroundColor Green
-}
