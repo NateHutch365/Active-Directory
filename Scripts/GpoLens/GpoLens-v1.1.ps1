@@ -57,6 +57,12 @@ function Get-GpoLinkScopes {
         -SearchBase $domainDN -SearchScope Subtree `
         -Properties gPLink, distinguishedName, objectClass
 
+    # Ensure domain root object is included (base object is not always returned reliably)
+    $domainRoot = Get-ADObject -Identity $domainDN -Properties gPLink, distinguishedName, objectClass -ErrorAction SilentlyContinue
+    if ($domainRoot -and $domainRoot.gPLink -like "*$guidText*") {
+        $targets += $domainRoot
+    }
+
     # Site links
     $sitesBase = "CN=Sites,$configDN"
     $targets += Get-ADObject -LDAPFilter "(gPLink=*$guidText*)" `
@@ -68,13 +74,13 @@ function Get-GpoLinkScopes {
         $opt = if ($m.Success) { [int]$m.Groups[1].Value } else { $null }
         $decoded = if ($null -ne $opt) { ConvertFrom-LinkOptions -Option $opt } else { $null }
 
+        # More reliable ScopeType detection (DN-based for Domain root)
         $scopeType =
-            switch ($t.ObjectClass) {
-                "domainDNS"          { "Domain" }
-                "organizationalUnit" { "OU" }
-                "site"               { "Site" }
-                default              { $t.ObjectClass }
-            }
+            if ($t.DistinguishedName -eq $domainDN) { "Domain" }
+            elseif ($t.ObjectClass -eq "organizationalUnit") { "OU" }
+            elseif ($t.ObjectClass -eq "site") { "Site" }
+            elseif ($t.ObjectClass -eq "domainDNS") { "Domain" }
+            else { $t.ObjectClass }
 
         $friendlyName =
             if ($scopeType -eq "Domain") {
@@ -176,6 +182,7 @@ foreach ($gpo in $allGposInDomain) {
                     ScopeType               = $s.ScopeType
                     ScopeName               = $s.ScopeName
                     ScopeDN                 = $s.ScopeDN
+                    ScopeKey                = ($s.ScopeType + "|" + ($s.ScopeDN.ToLower()))   # Normalised key for overlap detection
                     LinkEnabled             = $s.LinkEnabled
                     LinkEnforced            = $s.LinkEnforced
                     SecurityFilteringApply  = ($applyList -join "; ")
@@ -191,6 +198,7 @@ foreach ($gpo in $allGposInDomain) {
                 ScopeType               = ""
                 ScopeName               = ""
                 ScopeDN                 = ""
+                ScopeKey                = ""
                 LinkEnabled             = $null
                 LinkEnforced            = $null
                 SecurityFilteringApply  = ($applyList -join "; ")
@@ -227,10 +235,10 @@ if ($ShowOverlaps) {
         return
     }
 
-    # 1) Same-scope overlap
+    # 1) Same-scope overlap (normalised key)
     $sameScopeGroups = $matchRecords |
-        Where-Object { $_.ScopeDN } |
-        Group-Object ScopeType, ScopeDN |
+        Where-Object { $_.ScopeKey } |
+        Group-Object ScopeKey |
         Where-Object { $_.Count -gt 1 } |
         Sort-Object Count -Descending
 
@@ -405,7 +413,6 @@ Write-Host "Default Domain Policy visibility:" -ForegroundColor Cyan
 Write-Host ("  Matched search string (direct check): {0}" -f $(if ($ddpMatched) { "Yes" } else { "No" }))
 
 if ($ddpMatched) {
-    # If DDP is in gpoCoverage, show its score (it might not appear if it was not matched in main search)
     $ddpRow = $gpoCoverage | Where-Object { $_.GpoName -eq $ddpName } | Select-Object -First 1
     if ($ddpRow) {
         Write-Host "  Default Domain Policy score (if in candidates list):" -ForegroundColor Cyan
