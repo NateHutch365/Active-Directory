@@ -57,6 +57,12 @@ function Get-GpoLinkScopes {
         -SearchBase $domainDN -SearchScope Subtree `
         -Properties gPLink, distinguishedName, objectClass
 
+    # Ensure domain root object is included (base object is not always returned reliably)
+    $domainRoot = Get-ADObject -Identity $domainDN -Properties gPLink, distinguishedName, objectClass -ErrorAction SilentlyContinue
+    if ($domainRoot -and $domainRoot.gPLink -like "*$guidText*") {
+        $targets += $domainRoot
+    }
+
     # Site links
     $sitesBase = "CN=Sites,$configDN"
     $targets += Get-ADObject -LDAPFilter "(gPLink=*$guidText*)" `
@@ -68,13 +74,13 @@ function Get-GpoLinkScopes {
         $opt = if ($m.Success) { [int]$m.Groups[1].Value } else { $null }
         $decoded = if ($null -ne $opt) { ConvertFrom-LinkOptions -Option $opt } else { $null }
 
+        # More reliable ScopeType detection (DN-based for Domain root)
         $scopeType =
-            switch ($t.ObjectClass) {
-                "domainDNS"          { "Domain" }
-                "organizationalUnit" { "OU" }
-                "site"               { "Site" }
-                default              { $t.ObjectClass }
-            }
+            if ($t.DistinguishedName -eq $domainDN) { "Domain" }
+            elseif ($t.ObjectClass -eq "organizationalUnit") { "OU" }
+            elseif ($t.ObjectClass -eq "site") { "Site" }
+            elseif ($t.ObjectClass -eq "domainDNS") { "Domain" }
+            else { $t.ObjectClass }
 
         $friendlyName =
             if ($scopeType -eq "Domain") {
@@ -97,6 +103,15 @@ function Get-GpoLinkScopes {
     }
 }
 
+# Guard
+if ([string]::IsNullOrWhiteSpace($SearchString)) {
+    Write-Host "SearchString is empty. Provide -SearchString, e.g. -SearchString ""NTLM V2""" -ForegroundColor Yellow
+    return
+}
+
+# Treat SearchString as literal text (safe, avoids regex surprises)
+$pattern = [regex]::Escape($SearchString)
+
 # Prep export folder if requested
 if ($ExportCsv) {
     if (-not (Test-Path -Path $ExportPath)) {
@@ -117,7 +132,7 @@ foreach ($gpo in $allGposInDomain) {
 
     $report = Get-GPOReport -Guid $gpo.Id -ReportType Xml
 
-    if ($report -match $SearchString) {
+    if ($report -match $pattern) {
 
         Write-Host "********** Match found in: $counter. $($gpo.DisplayName) **********" -ForegroundColor Green
 
@@ -161,32 +176,33 @@ foreach ($gpo in $allGposInDomain) {
         if ($scopes -and $scopes.Count -gt 0) {
             foreach ($s in $scopes) {
                 $matchRecords.Add([PSCustomObject]@{
-                    SearchString    = $SearchString
-                    GpoName         = $gpo.DisplayName
-                    GpoGuid         = $gpo.Id
-                    ScopeType       = $s.ScopeType
-                    ScopeName       = $s.ScopeName
-                    ScopeDN         = $s.ScopeDN
-                    LinkEnabled     = $s.LinkEnabled
-                    LinkEnforced    = $s.LinkEnforced
-                    SecurityFilteringApply = ($applyList -join "; ")
-                    WmiFilter       = if ($wmi) { $wmi.Name } else { "" }
+                    SearchString            = $SearchString
+                    GpoName                 = $gpo.DisplayName
+                    GpoGuid                 = $gpo.Id
+                    ScopeType               = $s.ScopeType
+                    ScopeName               = $s.ScopeName
+                    ScopeDN                 = $s.ScopeDN
+                    ScopeKey                = ($s.ScopeType + "|" + ($s.ScopeDN.ToLower()))   # Normalised key for overlap detection
+                    LinkEnabled             = $s.LinkEnabled
+                    LinkEnforced            = $s.LinkEnforced
+                    SecurityFilteringApply  = ($applyList -join "; ")
+                    WmiFilter               = if ($wmi) { $wmi.Name } else { "" }
                 })
             }
         }
         else {
-            # Still record the match even if there are no links
             $matchRecords.Add([PSCustomObject]@{
-                SearchString    = $SearchString
-                GpoName         = $gpo.DisplayName
-                GpoGuid         = $gpo.Id
-                ScopeType       = ""
-                ScopeName       = ""
-                ScopeDN         = ""
-                LinkEnabled     = $null
-                LinkEnforced    = $null
-                SecurityFilteringApply = ($applyList -join "; ")
-                WmiFilter       = if ($wmi) { $wmi.Name } else { "" }
+                SearchString            = $SearchString
+                GpoName                 = $gpo.DisplayName
+                GpoGuid                 = $gpo.Id
+                ScopeType               = ""
+                ScopeName               = ""
+                ScopeDN                 = ""
+                ScopeKey                = ""
+                LinkEnabled             = $null
+                LinkEnforced            = $null
+                SecurityFilteringApply  = ($applyList -join "; ")
+                WmiFilter               = if ($wmi) { $wmi.Name } else { "" }
             })
         }
 
@@ -205,6 +221,7 @@ if ($ExportCsv) {
     Write-Host "Exported matches to: $matchesCsv" -ForegroundColor Cyan
 }
 
+# Overlap analysis
 if ($ShowOverlaps) {
 
     Write-Host ""
@@ -218,24 +235,24 @@ if ($ShowOverlaps) {
         return
     }
 
-    # 1) Same-scope overlap
+    # 1) Same-scope overlap (normalised key)
     $sameScopeGroups = $matchRecords |
-        Where-Object { $_.ScopeDN } |
-        Group-Object ScopeType, ScopeDN |
+        Where-Object { $_.ScopeKey } |
+        Group-Object ScopeKey |
         Where-Object { $_.Count -gt 1 } |
         Sort-Object Count -Descending
 
     $sameScopeOverlaps = foreach ($g in $sameScopeGroups) {
         foreach ($row in ($g.Group | Sort-Object GpoName)) {
             [PSCustomObject]@{
-                ScopeType = $row.ScopeType
-                ScopeName = $row.ScopeName
-                ScopeDN   = $row.ScopeDN
-                GpoName   = $row.GpoName
-                LinkEnabled  = $row.LinkEnabled
-                LinkEnforced = $row.LinkEnforced
+                ScopeType              = $row.ScopeType
+                ScopeName              = $row.ScopeName
+                ScopeDN                = $row.ScopeDN
+                GpoName                = $row.GpoName
+                LinkEnabled            = $row.LinkEnabled
+                LinkEnforced           = $row.LinkEnforced
                 SecurityFilteringApply = $row.SecurityFilteringApply
-                WmiFilter = $row.WmiFilter
+                WmiFilter              = $row.WmiFilter
             }
         }
     }
@@ -268,7 +285,6 @@ if ($ShowOverlaps) {
                     ParentScopeDN   = $parent.ScopeDN
                     ParentGpoName   = $parent.GpoName
                     ParentEnforced  = $parent.LinkEnforced
-
                     ChildScopeType  = $child.ScopeType
                     ChildScopeName  = $child.ScopeName
                     ChildScopeDN    = $child.ScopeDN
@@ -292,8 +308,10 @@ if ($ShowOverlaps) {
     }
 
     Write-Host ""
-    Write-Host "Note: This highlights *potential* overlap based on links. It does not compute effective application (block inheritance, link order, loopback, item-level targeting, etc.)." -ForegroundColor DarkYellow
+    Write-Host "Note: This highlights potential overlap based on links. It does not compute effective application (block inheritance, link order, loopback, item-level targeting, etc.)." -ForegroundColor DarkYellow
 }
+
+# Summary
 Write-Host ""
 Write-Host "==============================" -ForegroundColor Cyan
 Write-Host "SUMMARY" -ForegroundColor Cyan
@@ -316,7 +334,19 @@ $summary | Format-Table -AutoSize | Out-String | Write-Host
 
 # -----------------------------
 # Baseline candidates (Top 3 with score breakdown)
+# + Default Domain Policy direct visibility check
 # -----------------------------
+
+# Default Domain Policy visibility - check DDP directly, not via matchRecords
+$ddpName = "Default Domain Policy"
+$ddpMatched = $false
+try {
+    $ddpReport = Get-GPOReport -Name $ddpName -ReportType Xml
+    $ddpMatched = ($ddpReport -match $pattern)
+}
+catch {
+    $ddpMatched = $false
+}
 
 $broadApplyPatterns = @(
     "Authenticated Users",
@@ -345,24 +375,19 @@ $gpoCoverage = $matchRecords |
         $gpoName = $_.Name
         $rows = $_.Group
 
-        $uniqueScopes = ($rows | Where-Object { $_.ScopeDN } |
-                         Select-Object -ExpandProperty ScopeDN -Unique)
+        $uniqueScopes = ($rows | Where-Object { $_.ScopeDN } | Select-Object -ExpandProperty ScopeDN -Unique)
         $scopeCount   = $uniqueScopes.Count
 
         $hasDomainLink = ($rows | Where-Object { $_.ScopeType -eq "Domain" }).Count -gt 0
 
-        $sec = ($rows | Select-Object -ExpandProperty SecurityFilteringApply -Unique |
-                Where-Object { $_ }) -join " | "
+        $sec = ($rows | Select-Object -ExpandProperty SecurityFilteringApply -Unique | Where-Object { $_ }) -join " | "
 
-        $looksBroad = Test-BroadApply -SecurityFilteringApply $sec
+        $looksBroad   = Test-BroadApply -SecurityFilteringApply $sec
         $enforcedCount = ($rows | Where-Object { $_.LinkEnforced -eq $true }).Count
 
-        # ---- SCORING BREAKDOWN ----
-        $scopeScore = $scopeCount * 2
-        $broadScore = if ($looksBroad) { 10 } else { -10 }
-        $domainScore = if ($hasDomainLink -and $looksBroad) { 8 }
-                       elseif ($hasDomainLink) { -3 }
-                       else { 0 }
+        $scopeScore    = $scopeCount * 2
+        $broadScore    = if ($looksBroad) { 10 } else { -10 }
+        $domainScore   = if ($hasDomainLink -and $looksBroad) { 8 } elseif ($hasDomainLink) { -3 } else { 0 }
         $enforcedScore = [Math]::Min($enforcedCount, 3)
 
         $totalScore = $scopeScore + $broadScore + $domainScore + $enforcedScore
@@ -370,22 +395,35 @@ $gpoCoverage = $matchRecords |
         [PSCustomObject]@{
             GpoName         = $gpoName
             TotalScore      = $totalScore
-
             ScopeScore      = $scopeScore
             BroadApplyScore = $broadScore
             DomainLinkScore = $domainScore
             EnforcedScore   = $enforcedScore
-
             LinkedScopes    = $scopeCount
             HasDomainLink   = $hasDomainLink
             LooksBroadApply = $looksBroad
             EnforcedLinks   = $enforcedCount
-
             SecurityFiltering = $sec
         }
     } |
-    Sort-Object -Property `
-        @{ Expression = 'TotalScore' ; Descending = $true }
+    Sort-Object -Property @{ Expression = "TotalScore"; Descending = $true }
+
+Write-Host ""
+Write-Host "Default Domain Policy visibility:" -ForegroundColor Cyan
+Write-Host ("  Matched search string (direct check): {0}" -f $(if ($ddpMatched) { "Yes" } else { "No" }))
+
+if ($ddpMatched) {
+    $ddpRow = $gpoCoverage | Where-Object { $_.GpoName -eq $ddpName } | Select-Object -First 1
+    if ($ddpRow) {
+        Write-Host "  Default Domain Policy score (if in candidates list):" -ForegroundColor Cyan
+        $ddpRow | Select-Object GpoName, TotalScore, LinkedScopes, HasDomainLink, LooksBroadApply, EnforcedLinks |
+            Format-Table -AutoSize | Out-String | Write-Host
+    }
+
+    Write-Host "  Best practice note:" -ForegroundColor Yellow
+    Write-Host "   - Default Domain Policy is typically kept minimal (password, account lockout, Kerberos policy)." -ForegroundColor Yellow
+    Write-Host "   - Broader security hardening settings are usually placed in separate baseline GPOs for clarity and safer recovery." -ForegroundColor Yellow
+}
 
 if ($gpoCoverage -and $gpoCoverage.Count -gt 0) {
 
@@ -403,16 +441,40 @@ if ($gpoCoverage -and $gpoCoverage.Count -gt 0) {
 
     foreach ($g in $top3) {
         Write-Host ""
-        Write-Host "GPO: $($g.GpoName)" -ForegroundColor Green
-        Write-Host "  Total Score      : $($g.TotalScore)"
-        Write-Host "   - ScopeScore     : $($g.ScopeScore)"
-        Write-Host "   - BroadApplyScore: $($g.BroadApplyScore)"
-        Write-Host "   - DomainLinkScore: $($g.DomainLinkScore)"
-        Write-Host "   - EnforcedScore  : $($g.EnforcedScore)"
-        Write-Host "  Security Filtering: $($g.SecurityFiltering)"
+        Write-Host ("GPO: {0}" -f $g.GpoName) -ForegroundColor Green
+        Write-Host ("  Total Score       : {0}" -f $g.TotalScore)
+        Write-Host ("   - ScopeScore      : {0}" -f $g.ScopeScore)
+        Write-Host ("   - BroadApplyScore : {0}" -f $g.BroadApplyScore)
+        Write-Host ("   - DomainLinkScore : {0}" -f $g.DomainLinkScore)
+        Write-Host ("   - EnforcedScore   : {0}" -f $g.EnforcedScore)
+        Write-Host ("  Security Filtering : {0}" -f $g.SecurityFiltering)
     }
 
+    # -------------------------------------------------
+    # Design advisory if Default Domain Policy is #1
+    # -------------------------------------------------
+    $topCandidate = $gpoCoverage | Select-Object -First 1
+
+    if ($topCandidate.GpoName -eq "Default Domain Policy") {
+
+        Write-Host ""
+        Write-Host "Design advisory:" -ForegroundColor Yellow
+        Write-Host "  Default Domain Policy currently appears to act as the baseline for this setting (highest score)." -ForegroundColor Yellow
+        Write-Host "  It is generally recommended to keep Default Domain Policy minimal (password, account lockout, Kerberos)." -ForegroundColor Yellow
+        Write-Host "  Consider consolidating this setting into a dedicated baseline GPO if pursuing a minimal Default Domain Policy model." -ForegroundColor Yellow
+
+        $nextBest = $gpoCoverage |
+            Where-Object { $_.GpoName -ne "Default Domain Policy" } |
+            Select-Object -First 1
+
+        if ($nextBest) {
+            Write-Host ""
+            Write-Host "  Suggested alternative baseline candidate:" -ForegroundColor Yellow
+            Write-Host ("   - {0} (Score: {1})" -f $nextBest.GpoName, $nextBest.TotalScore) -ForegroundColor Yellow
+        }
+    }
 }
 else {
     Write-Host "Baseline candidate: None (no matches)" -ForegroundColor Yellow
 }
+
