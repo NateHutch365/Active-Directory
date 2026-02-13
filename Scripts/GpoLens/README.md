@@ -2,6 +2,8 @@
 
 **GpoLens** is a PowerShell-based analysis tool designed to inspect how a specific configuration setting is implemented across Group Policy Objects (GPOs) in an Active Directory domain.
 
+The original idea for this tool came from a PowerShell script created by Khalid Abulhani and Ian Matthews: https://www.urtech.ca/2024/11/solved-powershell-script-to-search-all-gpos-for-a-setting/
+
 It goes beyond simple string matching and provides:
 
 * GPO discovery by setting content
