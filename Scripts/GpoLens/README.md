@@ -287,6 +287,91 @@ With CSV export and custom output path:
 
 GpoLens is designed for architectural visibility, not runtime policy simulation.
 
+## 🔎 Search Behaviour and XML Encoding Notes
+
+GpoLens searches the **raw XML output** of each GPO report. This means searches are performed against the exact text stored in the XML — not the friendly formatting you see in the Group Policy Management Console.
+
+### Why longer search strings sometimes return no results
+
+Some policy values contain special characters (for example `&`, `<`, `>`). In XML, these characters are encoded for safety:
+
+| Character | XML Representation |
+| --------- | ------------------ |
+| `&`       | `&amp;`            |
+| `<`       | `&lt;`             |
+| `>`       | `&gt;`             |
+
+For example, this setting:
+
+```
+Send NTLMv2 response only. Refuse LM & NTLM
+```
+
+Is stored in the XML as:
+
+```
+Send NTLMv2 response only. Refuse LM &amp; NTLM
+```
+
+If you search for:
+
+```
+"Send NTLMv2 response only. Refuse LM & NTLM"
+```
+
+It may not match unless the script normalises the XML encoding.
+
+---
+
+### ✅ Recommended search patterns
+
+To ensure reliable matching, prefer one of the following:
+
+* `Send NTLMv2 response only`
+* `Refuse LM`
+* `LmCompatibilityLevel`
+* `Network security: LAN Manager authentication level`
+* `NTLM V2`
+
+These are more resilient to encoding differences and formatting variations.
+
+---
+
+### 🔬 Example
+
+Instead of this (may fail due to XML encoding):
+
+```
+-SearchString "Send NTLMv2 response only. Refuse LM & NTLM"
+```
+
+Use one of these:
+
+```
+-SearchString "Send NTLMv2 response only"
+```
+
+or
+
+```
+-SearchString "LmCompatibilityLevel"
+```
+
+---
+
+### 📌 Important
+
+GpoLens performs **literal text matching** against the XML report. It does not interpret policy values or calculate effective settings. If a string does not appear in the XML exactly (or after encoding normalisation), it will not be detected.
+
+When troubleshooting unexpected results, manually inspect the GPO XML using:
+
+```powershell
+Get-GPOReport -Name "Default Domain Policy" -ReportType Xml
+```
+
+Then search within that output to determine the exact string representation stored in the report.
+
+
 ---
 
 # Versioning Recommendation
