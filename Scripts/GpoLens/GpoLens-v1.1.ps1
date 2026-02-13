@@ -97,6 +97,15 @@ function Get-GpoLinkScopes {
     }
 }
 
+# Guard
+if ([string]::IsNullOrWhiteSpace($SearchString)) {
+    Write-Host "SearchString is empty. Provide -SearchString, e.g. -SearchString ""NTLM V2""" -ForegroundColor Yellow
+    return
+}
+
+# Treat SearchString as literal text (safe, avoids regex surprises)
+$pattern = [regex]::Escape($SearchString)
+
 # Prep export folder if requested
 if ($ExportCsv) {
     if (-not (Test-Path -Path $ExportPath)) {
@@ -117,7 +126,7 @@ foreach ($gpo in $allGposInDomain) {
 
     $report = Get-GPOReport -Guid $gpo.Id -ReportType Xml
 
-    if ($report -match $SearchString) {
+    if ($report -match $pattern) {
 
         Write-Host "********** Match found in: $counter. $($gpo.DisplayName) **********" -ForegroundColor Green
 
@@ -315,15 +324,21 @@ $summary = [PSCustomObject]@{
 
 $summary | Format-Table -AutoSize | Out-String | Write-Host
 
-# Baseline candidates + DDP visibility
-Write-Host ""
-Write-Host "==============================" -ForegroundColor Cyan
-Write-Host "BASELINE CANDIDATES" -ForegroundColor Cyan
-Write-Host "==============================" -ForegroundColor Cyan
+# -----------------------------
+# Baseline candidates (Top 3 with score breakdown)
+# + Default Domain Policy direct visibility check
+# -----------------------------
 
-# Default Domain Policy visibility
+# Default Domain Policy visibility - check DDP directly, not via matchRecords
 $ddpName = "Default Domain Policy"
-$ddpMatched = ($matchRecords | Where-Object { $_.GpoName -eq $ddpName }).Count -gt 0
+$ddpMatched = $false
+try {
+    $ddpReport = Get-GPOReport -Name $ddpName -ReportType Xml
+    $ddpMatched = ($ddpReport -match $pattern)
+}
+catch {
+    $ddpMatched = $false
+}
 
 $broadApplyPatterns = @(
     "Authenticated Users",
@@ -387,22 +402,19 @@ $gpoCoverage = $matchRecords |
 
 Write-Host ""
 Write-Host "Default Domain Policy visibility:" -ForegroundColor Cyan
-Write-Host ("  Matched search string: {0}" -f $(if ($ddpMatched) { "Yes" } else { "No" }))
+Write-Host ("  Matched search string (direct check): {0}" -f $(if ($ddpMatched) { "Yes" } else { "No" }))
 
 if ($ddpMatched) {
+    # If DDP is in gpoCoverage, show its score (it might not appear if it was not matched in main search)
     $ddpRow = $gpoCoverage | Where-Object { $_.GpoName -eq $ddpName } | Select-Object -First 1
-
     if ($ddpRow) {
-        Write-Host "  Default Domain Policy score:" -ForegroundColor Cyan
+        Write-Host "  Default Domain Policy score (if in candidates list):" -ForegroundColor Cyan
         $ddpRow | Select-Object GpoName, TotalScore, LinkedScopes, HasDomainLink, LooksBroadApply, EnforcedLinks |
             Format-Table -AutoSize | Out-String | Write-Host
     }
-    else {
-        Write-Host "  Default Domain Policy score: Unable to calculate - no enabled links were included in scoring." -ForegroundColor Yellow
-    }
 
     Write-Host "  Best practice note:" -ForegroundColor Yellow
-    Write-Host "   - The Default Domain Policy is typically kept minimal (password, account lockout, Kerberos policy)." -ForegroundColor Yellow
+    Write-Host "   - Default Domain Policy is typically kept minimal (password, account lockout, Kerberos policy)." -ForegroundColor Yellow
     Write-Host "   - Broader security hardening settings are usually placed in separate baseline GPOs for clarity and safer recovery." -ForegroundColor Yellow
 }
 
@@ -434,4 +446,16 @@ if ($gpoCoverage -and $gpoCoverage.Count -gt 0) {
 }
 else {
     Write-Host "Baseline candidate: None (no matches)" -ForegroundColor Yellow
+}
+
+# Simple recommendation logic
+Write-Host ""
+if ($totalMatches -eq 0) {
+    Write-Host "Recommendation: Setting not found in any GPO." -ForegroundColor Yellow
+}
+elseif ($sameScopeCount -gt 0 -or $hierCount -gt 0) {
+    Write-Host "Recommendation: Overlap detected. Review for consolidation or architectural simplification." -ForegroundColor Yellow
+}
+else {
+    Write-Host "Recommendation: No scope overlap detected. Configuration appears clean from a linkage perspective." -ForegroundColor Green
 }
