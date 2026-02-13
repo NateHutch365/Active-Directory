@@ -259,6 +259,12 @@ With CSV export:
 .\GpoLens.ps1 -SearchString "NTLMv2" -ShowOverlaps -ExportCsv
 ```
 
+With CSV export and custom output path:
+
+```powershell
+.\GpoLens.ps1 -SearchString "NTLMv2" -ShowOverlaps -ExportCsv -ExportPath "C:\Reports\GpoLens"
+```
+
 ---
 
 # Intended Use Cases
